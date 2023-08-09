@@ -368,7 +368,7 @@ func (c *Connector) open(ctx context.Context) (cn *conn, err error) {
 
 	cn.c, err = dial(ctx, c.dialer, o)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to dial database server: %w", err)
 	}
 
 	err = cn.ssl(o)
@@ -376,7 +376,7 @@ func (c *Connector) open(ctx context.Context) (cn *conn, err error) {
 		if cn.c != nil {
 			cn.c.Close()
 		}
-		return nil, err
+		return nil, fmt.Errorf("unable to perform TLS handshake: %w", err)
 	}
 
 	// cn.startup panics on error. Make sure we don't leak cn.c.
@@ -1038,6 +1038,17 @@ func (cn *conn) recvMessage(r *readBuf) (byte, error) {
 	return t, nil
 }
 
+func (cn *conn) recvStartup(step string) (t byte, r *readBuf) {
+	defer func() {
+		var err error
+		errRecoverNoErrBadConn(&err)
+		if err != nil {
+			panic(fmt.Errorf("unable to receive message from backend during %s startup step: %w", step, err))
+		}
+	}()
+	return cn.recv()
+}
+
 // recv receives a message from the backend, but if an error happened while
 // reading the message or the received message was an ErrorResponse, it panics.
 // NoticeResponses are ignored.  This function should generally be used only
@@ -1048,7 +1059,7 @@ func (cn *conn) recv() (t byte, r *readBuf) {
 		r = &readBuf{}
 		t, err = cn.recvMessage(r)
 		if err != nil {
-			panic(err)
+			errorf("unable to read message from backend: %v", err)
 		}
 		switch t {
 		case 'E':
@@ -1183,11 +1194,11 @@ func (cn *conn) startup(o values) {
 	}
 	w.string("")
 	if err := cn.sendStartupPacket(w); err != nil {
-		panic(err)
+		errorf("unable to send connection startup packet: %v", err)
 	}
 
 	for {
-		t, r := cn.recv()
+		t, r := cn.recvStartup("initial")
 		switch t {
 		case 'K':
 			cn.processBackendKeyData(r)
@@ -1213,7 +1224,7 @@ func (cn *conn) auth(r *readBuf, o values) {
 		w.string(o["password"])
 		cn.send(w)
 
-		t, r := cn.recv()
+		t, r := cn.recvStartup("password auth")
 		if t != 'R' {
 			errorf("unexpected password response: %q", t)
 		}
@@ -1227,7 +1238,7 @@ func (cn *conn) auth(r *readBuf, o values) {
 		w.string("md5" + md5s(md5s(o["password"]+o["user"])+s))
 		cn.send(w)
 
-		t, r := cn.recv()
+		t, r := cn.recvStartup("md5 auth")
 		if t != 'R' {
 			errorf("unexpected password response: %q", t)
 		}
@@ -1302,7 +1313,7 @@ func (cn *conn) auth(r *readBuf, o values) {
 		w.bytes(scOut)
 		cn.send(w)
 
-		t, r := cn.recv()
+		t, r := cn.recvStartup("SCRAM auth step 1")
 		if t != 'R' {
 			errorf("unexpected password response: %q", t)
 		}
@@ -1322,7 +1333,7 @@ func (cn *conn) auth(r *readBuf, o values) {
 		w.bytes(scOut)
 		cn.send(w)
 
-		t, r = cn.recv()
+		t, r = cn.recvStartup("SCRAM auth step 2")
 		if t != 'R' {
 			errorf("unexpected password response: %q", t)
 		}
